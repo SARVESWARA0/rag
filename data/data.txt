@@ -1,0 +1,22 @@
+# Page 1
+
+This is a mock PDF content for testing purposes. The actual PDF content would be extracted here.
+
+# Page 2
+
+This is the second page of the mock PDF content. The insurance policy document would contain information about:
+
+- Grace period for premium payment
+- Waiting period for pre-existing diseases
+- Maternity expenses coverage
+- Cataract surgery waiting period
+- Organ donor medical expenses
+- No Claim Discount (NCD)
+- Preventive health check-ups
+- Hospital definition
+- AYUSH treatments coverage
+- Room rent and ICU charges sub-limits
+
+# Page 3
+
+Additional policy details and terms would be extracted from the actual PDF document.

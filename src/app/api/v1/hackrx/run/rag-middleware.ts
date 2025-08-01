@@ -2,7 +2,6 @@ import { Pinecone } from '@pinecone-database/pinecone';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { 
   Experimental_LanguageModelV1Middleware as LanguageModelV1Middleware,
-  LanguageModelV1StreamPart 
 } from 'ai';
 
 export class PineconeService {
@@ -17,12 +16,12 @@ export class PineconeService {
   private async initialize() {
     if (!this.pinecone) {
       this.pinecone = new Pinecone({
-        apiKey:'pcsk_48pNCi_7z4viPmEujayoK2jtyFKXXY5uMFR5jMaPYnANZ9GRCQvtVd77jPaT8k6kMwzd6G'
+        apiKey: process.env.PINECONE_API_KEY ,
       });
 
-      this.index = this.pinecone.index('bit');
+      this.index = this.pinecone.index('rag');
       
-      const genAI = new GoogleGenerativeAI('AIzaSyDd0ktqwKnFOfaQCU0dryXuhcnhiuybXFQ');
+      const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
       this.embedModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
     }
   }
@@ -97,7 +96,7 @@ export const pineconeMiddleware: LanguageModelV1Middleware = {
       }
 
       const context = sources.map(chunk => JSON.stringify(chunk)).join('\n');
-      
+
       return {
         ...params,
         prompt: [
@@ -114,35 +113,18 @@ export const pineconeMiddleware: LanguageModelV1Middleware = {
     }
   },
 
-  wrapStream: async ({ doStream, params }) => {
+  wrapGenerate: async ({ doGenerate, params, model }) => {
     try {
-      const { stream, ...rest } = await doStream();
+      const result = await doGenerate();
 
-      let generatedText = '';
-      const transformStream = new TransformStream<
-        LanguageModelV1StreamPart,
-        LanguageModelV1StreamPart
-      >({
-        transform(chunk, controller) {
-          if (chunk.type === 'text-delta') {
-            generatedText += chunk.textDelta;
-          }
-          controller.enqueue(chunk);
-        },
-        flush() {
-          console.log('Generated text:', generatedText);
-        },
-      });
+      if (result && 'text' in result) {
+        console.log('Generated text:', result.text);
+      }
 
-      return {
-        stream: stream.pipeThrough(transformStream),
-        ...rest,
-      };
+      return result;
     } catch (error) {
-      console.error('Error in stream middleware:', error);
-      return await doStream();
+      console.error('Error in wrapGenerate middleware:', error);
+      return await doGenerate();
     }
   }
 };
-
-export default pineconeMiddleware;

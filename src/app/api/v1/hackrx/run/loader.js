@@ -4,20 +4,20 @@ import fs from 'fs/promises';
 import path from 'path';
 
 const config = {
-    indexName: 'bit',
+    indexName: 'rag',
     dimension: 768,
     batchSize: 10,
     recordsPerNamespace: 300,
-    wordsPerChunk: 1000
+    wordsPerChunk: 350
 };
 
 async function initServices() {
     try {
         const pinecone = new Pinecone({
-            apiKey: 'pcsk_48pNCi_7z4viPmEujayoK2jtyFKXXY5uMFR5jMaPYnANZ9GRCQvtVd77jPaT8k6kMwzd6G'
+            apiKey: process.env.PINECONE_API_KEY,
         });
 
-        const genAI = new GoogleGenerativeAI('AIzaSyDd0ktqwKnFOfaQCU0dryXuhcnhiuybXFQ');
+        const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
         const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
         const index = pinecone.index(config.indexName);
 
@@ -189,11 +189,13 @@ async function processAndUpsert(chunks, fileName, index, embeddingModel) {
     return results;
 }
 
-async function main() {
+// Modified main function to work with API routes
+async function main(customFilePath = null) {
     try {
         const { pinecone, embeddingModel, index } = await initServices();
         
-        const filePath = './data.txt';
+        // Use custom file path if provided, otherwise default to './data.txt'
+        const filePath = customFilePath || './data.txt';
         const fileName = path.basename(filePath);
         
         console.log(`\nProcessing file: ${filePath}`);
@@ -202,25 +204,37 @@ async function main() {
         const results = await processAndUpsert(chunks, fileName, index, embeddingModel);
         
         console.log('\nProcessing results:');
+        const resultObj = {};
         for (const [namespace, count] of results.entries()) {
             console.log(`${namespace}: ${count} chunks processed`);
+            resultObj[namespace] = count;
         }
 
         const stats = await index.describeIndexStats();
         console.log('\nFinal index stats:', JSON.stringify(stats, null, 2));
 
+        // Return results for API response
+        return {
+            processedChunks: chunks.length,
+            namespaces: resultObj,
+            totalVectors: Object.values(resultObj).reduce((sum, count) => sum + count, 0),
+            indexStats: stats
+        };
+
     } catch (error) {
         console.error('Error in main process:', error);
-        process.exit(1);
+        throw error; // Re-throw for API error handling
     }
 }
 
+// For standalone execution
 process.on('unhandledRejection', (error) => {
     console.error('Unhandled promise rejection:', error);
     process.exit(1);
 });
 
-if (import.meta.url === new URL(import.meta.url).href) {
+// Only run main if this file is executed directly (not imported)
+if (import.meta.url === `file://${process.argv[1]}`) {
     main();
 }
 
