@@ -28,37 +28,57 @@ async function initServices() {
     }
 }
 
-function splitTextIntoChunks(
-  text,
-  maxTokens = 350,
-  overlapTokens = 50,
-  tokenize = str => str.split(/\s+/)  // replace with a real tokenizer if you have one
-) {
-  if (!text.trim()) return [];
-
-  // Break into sentences
-  const sentences = text.match(/[^\.!\?]+[\.!\?]+(?:\s|$)/g) || [text];
-  const chunks = [];
-  let currentTokens = [];
-
-  for (const sentence of sentences) {
-    const sentTokens = tokenize(sentence);
-    if (currentTokens.length + sentTokens.length > maxTokens) {
-      // flush current chunk
-      chunks.push(currentTokens.join(' '));
-      // carry over overlap
-      currentTokens = currentTokens.slice(-overlapTokens);
+function splitTextIntoChunks(text) {
+    if (!text || text.trim().length === 0) {
+        console.log("Received empty or whitespace-only text");
+        return [];
     }
-    currentTokens.push(...sentTokens);
-  }
-  if (currentTokens.length) chunks.push(currentTokens.join(' '));
 
-  return chunks.map(c => ({
-    content: c,
-    wordCount: c.split(/\s+/).length
-  }));
+    // First, split by headers (markdown headers)
+    const headerSplit = text.split(/(?=^#+\s)/m);
+    const chunks = [];
+    
+    for (const section of headerSplit) {
+        if (!section.trim()) continue;
+        
+        // If section is too long, split it further
+        if (section.length > 2000) {
+            // Split by sentences while preserving context
+            const sentences = section.split(/(?<=[.!?])\s+/);
+            let currentChunk = '';
+            
+            for (const sentence of sentences) {
+                if ((currentChunk + sentence).length > 1500) {
+                    if (currentChunk.trim()) {
+                        chunks.push({
+                            content: currentChunk.trim(),
+                            wordCount: currentChunk.split(/\s+/).length
+                        });
+                    }
+                    currentChunk = sentence;
+                } else {
+                    currentChunk += (currentChunk ? ' ' : '') + sentence;
+                }
+            }
+            
+            if (currentChunk.trim()) {
+                chunks.push({
+                    content: currentChunk.trim(),
+                    wordCount: currentChunk.split(/\s+/).length
+                });
+            }
+        } else {
+            // Section is appropriately sized
+            chunks.push({
+                content: section.trim(),
+                wordCount: section.split(/\s+/).length
+            });
+        }
+    }
+    
+    // Filter out very short chunks that might not be meaningful
+    return chunks.filter(chunk => chunk.content.length > 50);
 }
-
 
 async function readAndProcessFile(filePath) {
     try {
@@ -77,12 +97,10 @@ async function readAndProcessFile(filePath) {
 
 async function generateEmbeddings(chunks, embeddingModel) {
     try {
-        console.log(`Generating embeddings for ${chunks.length} chunks`);
         const embeddings = [];
         const batchSize = 5; 
         for (let i = 0; i < chunks.length; i += batchSize) {
             const batch = chunks.slice(i, i + batchSize);
-            console.log(`Processing batch ${Math.floor(i/batchSize) + 1}, chunks ${i+1}-${Math.min(i+batchSize, chunks.length)}`);
             const promises = batch.map(chunk => 
                 embeddingModel.embedContent(chunk.content)
                     .then(result => ({
@@ -92,10 +110,8 @@ async function generateEmbeddings(chunks, embeddingModel) {
                     }))
             );
             const results = await Promise.all(promises);
-            console.log(`Generated embeddings for batch ${Math.floor(i/batchSize) + 1}, embedding length: ${results[0].embedding.length}`);
             embeddings.push(...results);
         }
-        console.log(`Total embeddings generated: ${embeddings.length}`);
         return embeddings;
     } catch (error) {
         console.error("Error in batch embedding generation:", error);
@@ -108,10 +124,9 @@ async function getCurrentNamespaceCount(index, namespace) {
         const stats = await index.describeIndexStats({
             filter: { namespace: namespace }
         });
-        console.log(`Namespace ${namespace} stats:`, stats.namespaces[namespace]);
         return stats.namespaces[namespace]?.recordCount || 0;
     } catch (error) {
-        console.error(`Error getting namespace count for ${namespace}:`, error);
+        console.error(`Error getting namespace count:`, error);
         return 0;
     }
 }
@@ -179,34 +194,22 @@ async function processAndUpsert(chunks, fileName, index, embeddingModel) {
             results.get(currentNamespaceInfo.namespace) + 1
         );
 
-            if (currentBatch.length >= config.batchSize) {
-        try {
-            console.log(`Upserting batch of ${currentBatch.length} records to namespace ${currentNamespaceInfo.namespace}`);
-            console.log(`First record sample:`, {
-                id: currentBatch[0].id,
-                contentLength: currentBatch[0].metadata.content.length,
-                embeddingLength: currentBatch[0].values.length
-            });
-            await index.namespace(currentNamespaceInfo.namespace).upsert(currentBatch);
-            console.log(`Successfully processed batch of ${currentBatch.length} records in namespace ${currentNamespaceInfo.namespace}`);
-            currentBatch = [];
-        } catch (error) {
-            console.error(`Error upserting batch to namespace ${currentNamespaceInfo.namespace}:`, error);
-            throw error;
+        if (currentBatch.length >= config.batchSize) {
+            try {
+                await index.namespace(currentNamespaceInfo.namespace).upsert(currentBatch);
+                console.log(`Processed batch of ${currentBatch.length} records in namespace ${currentNamespaceInfo.namespace}`);
+                currentBatch = [];
+            } catch (error) {
+                console.error(`Error upserting batch to namespace ${currentNamespaceInfo.namespace}:`, error);
+                throw error;
+            }
         }
-    }
     }
 
     if (currentBatch.length > 0) {
         try {
-            console.log(`Upserting final batch of ${currentBatch.length} records to namespace ${currentNamespaceInfo.namespace}`);
-            console.log(`Final record sample:`, {
-                id: currentBatch[0].id,
-                contentLength: currentBatch[0].metadata.content.length,
-                embeddingLength: currentBatch[0].values.length
-            });
             await index.namespace(currentNamespaceInfo.namespace).upsert(currentBatch);
-            console.log(`Successfully processed final batch of ${currentBatch.length} records in namespace ${currentNamespaceInfo.namespace}`);
+            console.log(`Processed final batch of ${currentBatch.length} records in namespace ${currentNamespaceInfo.namespace}`);
         } catch (error) {
             console.error(`Error upserting final batch to namespace ${currentNamespaceInfo.namespace}:`, error);
             throw error;
@@ -270,4 +273,4 @@ export {
     readAndProcessFile,
     processAndUpsert,
     main
-};
+}; 

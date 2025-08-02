@@ -1,4 +1,4 @@
-import { pineconeMiddleware } from '../hackrx/run/rag-middleware';
+import { pineconeMiddleware } from '../hackrx/run/rag-middleware.ts';
 import { experimental_wrapLanguageModel as wrapLanguageModel, generateText } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 
