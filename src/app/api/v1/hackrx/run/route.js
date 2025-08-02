@@ -55,7 +55,7 @@ class PineconeService {
       // Query Pinecone for relevant contexts
       const queryResponse = await this.index.namespace('default').query({
         vector: embeddingResult.embedding.values,
-        topK: 10,
+        topK: 15,
         includeMetadata: true
       });
 
@@ -207,10 +207,10 @@ INSTRUCTIONS:
 5. Include relevant policy clauses, sub-limits, waiting periods, and conditions.
 6. Be precise with percentages, time periods, monetary limits, and coverage terms.
 7. Focus on directly answering what the user asked, with no extra or assumed information.
+Remember:read every line of the context carefully ,the answer will be in it so answer carefully.
 
 CONTEXT:
 ${context}
-
 Respond only using the above context.
 `;
         const result = await generateText({ 
