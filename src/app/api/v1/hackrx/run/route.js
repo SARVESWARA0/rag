@@ -3,17 +3,18 @@ import fs from 'fs';
 import path from 'path';
 import FireCrawlApp from '@mendable/firecrawl-js';
 import { main as loaderMain } from './loader.js';
-import { generateText } from 'ai';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { generateText, wrapLanguageModel, extractReasoningMiddleware } from 'ai';
+import { createMistral } from '@ai-sdk/mistral';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Initialize Google Generative Model
-const google = createGoogleGenerativeAI({
-  apiKey: process.env.GOOGLE_API_KEY
+// Initialize Mistral model with reasoning middleware
+const mistral = createMistral({ apiKey: process.env.MISTRAL_API_KEY });
+const ragModel = wrapLanguageModel({
+  model: mistral('mistral-large-latest'),
+  middleware: extractReasoningMiddleware({ tagName: 'think' })
 });
 
-const model = google('gemini-2.0-flash');
 
 // Initialize Pinecone service
 class PineconeService {
@@ -125,7 +126,8 @@ export async function POST(request) {
         formats: ["markdown"],
         onlyMainContent: true,
         parsePDF: true,
-        maxAge: 14400000 // 4 hours cache
+        maxAge: 14400000, // 4 hours cache
+        headers: { Authorization: `Bearer ${token}` }
       });
 
       console.log('FireCrawl scraping completed successfully');
@@ -213,22 +215,28 @@ CONTEXT:
 ${context}
 Respond only using the above context.
 `;
-        const result = await generateText({ 
-          model: model, 
-          messages: [
-            { role: 'system', content: enhancedSystemPrompt },
-            { role: 'user', content: question }
-          ],
-          temperature: 0.1,
-          maxTokens: 400
-        });
+                 const result = await generateText({ 
+           model: ragModel,
+           messages: [
+             { role: 'system', content: enhancedSystemPrompt },
+             { role: 'user', content: question }
+           ],
+           temperature: 0.1,
+           maxTokens: 400
+         });
         console.log(`Generated answer for question ${i + 1}:`, result.text.trim());
         answers.push(result.text.trim());
         
-      } catch (error) {
-        console.error(`Error generating answer for question ${i + 1}:`, error);
-        answers.push(`Error generating answer: ${error.message}`);
-      }
+             } catch (error) {
+         console.error(`Error generating answer for question ${i + 1}:`, error);
+         
+         // Handle specific model compatibility errors
+         if (error.message.includes('Unsupported model version') || error.message.includes('AI_UnsupportedModelVersionError')) {
+           answers.push('Error: Model compatibility issue. Please check AI SDK version and model configuration.');
+         } else {
+           answers.push(`Error generating answer: ${error.message}`);
+         }
+       }
     }
 
     // Return comprehensive response
