@@ -3,10 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import FireCrawlApp from '@mendable/firecrawl-js';
 import { main as loaderMain } from './loader.js';
-import { generateText, wrapLanguageModel, extractReasoningMiddleware } from 'ai';
+import { generateText, wrapLanguageModel, extractReasoningMiddleware, embed } from 'ai';
 import { createMistral } from '@ai-sdk/mistral';
 import { Pinecone } from '@pinecone-database/pinecone';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Initialize Mistral model with reasoning middleware
 const mistral = createMistral({ apiKey: process.env.MISTRAL_API_KEY });
@@ -21,7 +20,6 @@ class PineconeService {
   constructor() {
     this.pinecone = null;
     this.index = null;
-    this.embedModel = null;
     this.initialize();
   }
 
@@ -32,31 +30,26 @@ class PineconeService {
       });
 
       this.index = this.pinecone.index('rag');
-
-      const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-      this.embedModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
     }
   }
 
   async findSources(text) {
     try {
       // Ensure services are initialized
-      if (!this.embedModel || !this.index) {
+      if (!this.index) {
         await this.initialize();
       }
 
-      // Correctly format embedding request for a query
-      const embeddingResult = await this.embedModel.embedContent({
-        content: {
-          parts: [{ text }]
-        },
-        taskType: 'RETRIEVAL_QUERY'
+      // Generate embedding using Mistral model
+      const { embedding } = await embed({
+        model: mistral.textEmbeddingModel('mistral-embed'),
+        value: text,
       });
 
       // Query Pinecone for relevant contexts
       const queryResponse = await this.index.namespace('default').query({
-        vector: embeddingResult.embedding.values,
-        topK: 15,
+        vector: embedding,
+        topK: 16,
         includeMetadata: true
       });
 
@@ -113,7 +106,7 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Missing or invalid authorization header' }, { status: 401 });
     }
     const token = authHeader.split(' ')[1];
-
+    console.log('Authorization token received:', token);
     console.log('Processing document URL:', documents);
     console.log('Questions count:', questions?.length || 0);
 
@@ -121,14 +114,18 @@ export async function POST(request) {
     console.log('Starting FireCrawl PDF scraping...');
     let markdownContent = '';
     
+   
+    
     try {
       const scrapeResult = await firecrawlApp.scrapeUrl(documents, {
-        formats: ["markdown"],
-        onlyMainContent: true,
-        parsePDF: true,
-        maxAge: 14400000, // 4 hours cache
-        headers: { Authorization: `Bearer ${token}` }
-      });
+  formats: ["markdown"],
+  onlyMainContent: true,
+  parsePDF: true,
+  maxAge: 14400000, // 4 hours cache
+  timeout: 10000000, // ⬅️ Add this line: timeout in milliseconds (100s)
+  
+});
+
 
       console.log('FireCrawl scraping completed successfully');
       console.log('Scraped content length:', scrapeResult.markdown?.length || 0);
@@ -141,7 +138,20 @@ export async function POST(request) {
       
     } catch (scrapeError) {
       console.error('FireCrawl scraping failed:', scrapeError);
-      throw new Error('Failed to scrape document content');
+      console.error('Error details:', {
+        message: scrapeError.message,
+        code: scrapeError.code,
+        status: scrapeError.status,
+        url: documents
+      });
+      
+      // Check if it's an authentication error
+      if (scrapeError.message?.includes('InvalidAuthenticationInfo') || 
+          scrapeError.message?.includes('Authentication information is not given')) {
+        throw new Error('FireCrawl authentication failed. Please check your FIRECRAWL_API_KEY environment variable.');
+      }
+      
+      throw new Error(`Failed to scrape document content: ${scrapeError.message}`);
     }
 
     // Clean up the markdown content

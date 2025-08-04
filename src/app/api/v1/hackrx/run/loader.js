@@ -1,27 +1,26 @@
 import { Pinecone } from '@pinecone-database/pinecone';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { createMistral } from '@ai-sdk/mistral';
+import { embedMany } from 'ai';
 import fs from 'fs/promises';
 import path from 'path';
 
 const config = {
     indexName: 'rag',
-    dimension: 768,
+    dimension: 1024, // Updated to 1024 for Mistral embeddings
     batchSize: 10,
     recordsPerNamespace: 300,
     wordsPerChunk: 350
 };
-
+const mistral = createMistral({ apiKey: process.env.MISTRAL_API_KEY });
 async function initServices() {
     try {
         const pinecone = new Pinecone({
             apiKey: process.env.PINECONE_API_KEY,
         });
 
-        const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-        const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
         const index = pinecone.index(config.indexName);
 
-        return { pinecone, embeddingModel, index };
+        return { pinecone, index };
     } catch (error) {
         console.error("Error initializing services:", error);
         throw error;
@@ -75,23 +74,32 @@ async function readAndProcessFile(filePath) {
     }
 }
 
-async function generateEmbeddings(chunks, embeddingModel) {
+async function generateEmbeddings(chunks) {
     try {
         console.log(`Generating embeddings for ${chunks.length} chunks`);
         const embeddings = [];
-        const batchSize = 5; 
+        const batchSize = 10; // Increased batch size for better efficiency
+        
         for (let i = 0; i < chunks.length; i += batchSize) {
             const batch = chunks.slice(i, i + batchSize);
             console.log(`Processing batch ${Math.floor(i/batchSize) + 1}, chunks ${i+1}-${Math.min(i+batchSize, chunks.length)}`);
-            const promises = batch.map(chunk => 
-                embeddingModel.embedContent(chunk.content)
-                    .then(result => ({
-                        embedding: result.embedding.values,
-                        content: chunk.content,
-                        wordCount: chunk.wordCount
-                    }))
-            );
-            const results = await Promise.all(promises);
+            
+            // Extract text content from chunks
+            const texts = batch.map(chunk => chunk.content);
+            
+            // Generate embeddings using Mistral model
+            const { embeddings: batchEmbeddings } = await embedMany({
+                model: mistral.textEmbeddingModel('mistral-embed'),
+                values: texts,
+            });
+            
+            // Combine embeddings with chunk metadata
+            const results = batchEmbeddings.map((embedding, index) => ({
+                embedding: embedding,
+                content: batch[index].content,
+                wordCount: batch[index].wordCount
+            }));
+            
             console.log(`Generated embeddings for batch ${Math.floor(i/batchSize) + 1}, embedding length: ${results[0].embedding.length}`);
             embeddings.push(...results);
         }
@@ -132,9 +140,9 @@ async function getNextNamespace(index, baseNamespace = 'default') {
     }
 }
 
-async function processAndUpsert(chunks, fileName, index, embeddingModel) {
+async function processAndUpsert(chunks, fileName, index) {
     const results = new Map();
-    const embeddingsWithMetadata = await generateEmbeddings(chunks, embeddingModel);
+    const embeddingsWithMetadata = await generateEmbeddings(chunks);
     let currentBatch = [];
     let currentNamespaceInfo = await getNextNamespace(index);
     let processedCount = 0;
@@ -219,7 +227,7 @@ async function processAndUpsert(chunks, fileName, index, embeddingModel) {
 // Modified main function to work with API routes
 async function main(customFilePath = null) {
     try {
-        const { pinecone, embeddingModel, index } = await initServices();
+        const { pinecone, index } = await initServices();
         
         // Use custom file path if provided, otherwise default to './data.txt'
         const filePath = customFilePath || './data.txt';
@@ -228,7 +236,7 @@ async function main(customFilePath = null) {
         console.log(`\nProcessing file: ${filePath}`);
         
         const chunks = await readAndProcessFile(filePath);
-        const results = await processAndUpsert(chunks, fileName, index, embeddingModel);
+        const results = await processAndUpsert(chunks, fileName, index);
         
         console.log('\nProcessing results:');
         const resultObj = {};
