@@ -73,9 +73,14 @@ class PineconeService {
 
 const pineconeService = new PineconeService();
 
-// Initialize FireCrawl
+// Initialize FireCrawl with fallback API key
 const firecrawlApp = new FireCrawlApp({
-  apiKey: process.env.FIRECRAWL_API_KEY
+  apiKey:process.env.FIRECRAWL_FALLBACK_API_KEY,
+});
+
+// Fallback FireCrawl instance with backup API key
+const firecrawlAppFallback = new FireCrawlApp({
+  apiKey: process.env.FIRECRAWL_API_KEY,
 });
 
 export async function GET(request) {
@@ -137,7 +142,7 @@ export async function POST(request) {
       }
       
     } catch (scrapeError) {
-      console.error('FireCrawl scraping failed:', scrapeError);
+      console.error('Primary FireCrawl API key failed:', scrapeError);
       console.error('Error details:', {
         message: scrapeError.message,
         code: scrapeError.code,
@@ -145,13 +150,63 @@ export async function POST(request) {
         url: documents
       });
       
-      // Check if it's an authentication error
+      // Check if it's an authentication error and try fallback
       if (scrapeError.message?.includes('InvalidAuthenticationInfo') || 
-          scrapeError.message?.includes('Authentication information is not given')) {
-        throw new Error('FireCrawl authentication failed. Please check your FIRECRAWL_API_KEY environment variable.');
+          scrapeError.message?.includes('Authentication information is not given') ||
+          scrapeError.message?.includes('Unauthorized') ||
+          scrapeError.message?.includes('Forbidden')) {
+        
+        console.log('Authentication error detected, trying fallback API key...');
+        
+        try {
+          const fallbackScrapeResult = await firecrawlAppFallback.scrapeUrl(documents, {
+            formats: ["markdown"],
+            onlyMainContent: true,
+            parsePDF: true,
+            maxAge: 14400000, // 4 hours cache
+            timeout: 10000000, // 100s timeout
+          });
+          
+          console.log('Fallback FireCrawl scraping completed successfully');
+          console.log('Fallback scraped content length:', fallbackScrapeResult.markdown?.length || 0);
+          
+          if (fallbackScrapeResult.markdown) {
+            markdownContent = fallbackScrapeResult.markdown;
+          } else {
+            throw new Error('No markdown content returned from fallback FireCrawl');
+          }
+          
+        } catch (fallbackError) {
+          console.error('Fallback FireCrawl also failed:', fallbackError);
+          throw new Error(`Both primary and fallback FireCrawl API keys failed. Primary error: ${scrapeError.message}, Fallback error: ${fallbackError.message}`);
+        }
+      } else {
+        // For non-authentication errors, try fallback anyway
+        console.log('Non-authentication error, trying fallback API key...');
+        
+        try {
+          const fallbackScrapeResult = await firecrawlAppFallback.scrapeUrl(documents, {
+            formats: ["markdown"],
+            onlyMainContent: true,
+            parsePDF: true,
+            maxAge: 14400000, // 4 hours cache
+            timeout: 10000000, // 100s timeout
+          });
+          
+          console.log('Fallback FireCrawl scraping completed successfully');
+          console.log('Fallback scraped content length:', fallbackScrapeResult.markdown?.length || 0);
+          
+          if (fallbackScrapeResult.markdown) {
+            markdownContent = fallbackScrapeResult.markdown;
+          } else {
+            throw new Error('No markdown content returned from fallback FireCrawl');
+          }
+          
+        } catch (fallbackError) {
+          console.error('Fallback FireCrawl also failed:', fallbackError);
+          throw new Error(`Failed to scrape document content with both API keys. Primary error: ${scrapeError.message}, Fallback error: ${fallbackError.message}`);
+        }
       }
-      
-      throw new Error(`Failed to scrape document content: ${scrapeError.message}`);
     }
 
     // Clean up the markdown content
