@@ -3,16 +3,18 @@ import fs from 'fs';
 import path from 'path';
 import FireCrawlApp from '@mendable/firecrawl-js';
 import { main as loaderMain } from './loader.js';
-import { generateText, wrapLanguageModel, extractReasoningMiddleware, embed } from 'ai';
+import { generateText, embed } from 'ai';
 import { createMistral } from '@ai-sdk/mistral';
 import { Pinecone } from '@pinecone-database/pinecone';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
+
+const google = createGoogleGenerativeAI({
+  apiKey: process.env.GOOGLE_API_KEY,
+});
 
 // Initialize Mistral model with reasoning middleware
 const mistral = createMistral({ apiKey: process.env.MISTRAL_API_KEY });
-const ragModel = wrapLanguageModel({
-  model: mistral('mistral-large-latest'),
-  middleware: extractReasoningMiddleware({ tagName: 'think' })
-});
+
 
 
 // Initialize Pinecone service
@@ -49,7 +51,7 @@ class PineconeService {
       // Query Pinecone for relevant contexts
       const queryResponse = await this.index.namespace('default').query({
         vector: embedding,
-        topK: 16,
+        topK: 8,
         includeMetadata: true
       });
 
@@ -209,10 +211,11 @@ export async function POST(request) {
       }
     }
 
-    // Clean up the markdown content
+    // Clean up the markdown content but preserve page-like separators (double newlines)
     markdownContent = markdownContent
-      .replace(/\n{3,}/g, '\n\n') // Remove excessive newlines
-      .replace(/\s+/g, ' ') // Normalize whitespace
+      .replace(/\n{4,}/g, '\n\n\n') // cap excessive newlines to triple to keep strong boundaries
+      .replace(/[\t\r]+/g, ' ') // normalize tabs/CRs but keep newlines
+      .replace(/ +/g, ' ') // collapse spaces
       .trim();
     
     console.log('Markdown content prepared, length:', markdownContent.length);
@@ -261,36 +264,62 @@ export async function POST(request) {
           .map((chunk, idx) => `[Context ${idx + 1}]: ${chunk}`)
           .join('\n\n');
 
-                // Create enhanced system prompt with retrieved context
-       
+        // Create enhanced system prompt with retrieved context
+       console.log(context)
         const enhancedSystemPrompt = `
 You are a Retrieval-Augmented Generation (RAG) chatbot designed to answer user questions strictly based on the provided insurance policy context.
 
 INSTRUCTIONS:
 1. Base your answers ONLY on the provided context from the policy document.
-2. If the information is not available in the context, reply with: "This information is not available in the provided policy document."
+2. If the information is not available in the context, reply with: "This information is not available in the provided policy document.But before that try to find the answer in the context provided below,there also can be a indirect information provided to it."
 3. Provide specific details, numbers, and exact policy terms when available.
 4. Keep your answer concise (2–3 sentences) but comprehensive.
 5. Include relevant policy clauses, sub-limits, waiting periods, and conditions.
 6. Be precise with percentages, time periods, monetary limits, and coverage terms.
 7. Focus on directly answering what the user asked, with no extra or assumed information.
-Remember:read every line of the context carefully ,the answer will be in it so answer carefully.
+8.dont mention the context number in the answer,just answer the question directly.
+Remember:read every line of the context carefully ,the answer will be in it so answer carefully,answers can be indirectly present in the context too so analyse it properly.
 
-CONTEXT:
-${context}
-Respond only using the above context.
-`;
-                 const result = await generateText({ 
-           model: ragModel,
-           messages: [
-             { role: 'system', content: enhancedSystemPrompt },
-             { role: 'user', content: question }
-           ],
-           temperature: 0.1,
-           maxTokens: 400
-         });
-        console.log(`Generated answer for question ${i + 1}:`, result.text.trim());
-        answers.push(result.text.trim());
+
+        `;
+                 // Try with latest model first; fall back to a stable model on ANY error (overload, rate limit, spec, etc.)
+                 let result;
+                 try {
+                   result = await generateText({
+                     model: google('gemini-2.0-flash'),
+                     messages: [
+                       { role: 'system', content: context },
+                       { role: 'user', content: question }
+                     ],
+                     system:enhancedSystemPrompt,
+                     temperature: 0.1,
+                     maxTokens: 400
+                   });
+                 } catch (primaryModelError) {
+                   console.warn('Primary model gemini-2.0-flash failed, falling back to gemini-1.5-flash', {
+                     message: primaryModelError?.message
+                   });
+                   try {
+                     result = await generateText({
+                       model: google('gemini-1.5-flash'),
+                       messages: [
+                         { role: 'system', content: enhancedSystemPrompt },
+                         { role: 'user', content: question }
+                       ],
+                       temperature: 0.1,
+                       maxTokens: 400
+                     });
+                   } catch (fallbackError) {
+                     // Re-throw including both errors to be handled by outer catch
+                     const combined = new Error(
+                       `Primary and fallback models failed. Primary: ${primaryModelError?.message}; Fallback: ${fallbackError?.message}`
+                     );
+                     throw combined;
+                   }
+                 }
+
+                 console.log(`Generated answer for question ${i + 1}:`, result.text.trim());
+                 answers.push(result.text.trim());
         
              } catch (error) {
          console.error(`Error generating answer for question ${i + 1}:`, error);
